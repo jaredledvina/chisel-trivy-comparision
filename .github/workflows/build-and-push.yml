@@ -324,9 +324,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-vanilla, build-chiseled, build-chiseled-dpkg]
     permissions:
-      contents: read
+      contents: write
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download vanilla scan results
         uses: actions/download-artifact@v4
         with:
@@ -446,6 +449,95 @@ jobs:
         with:
           name: comparison-report
           path: comparison-report.md
+
+      - name: Generate README.md
+        run: |
+          # Extract summary data from comparison report
+          VANILLA_TOTAL=$(grep "Vanilla Ubuntu Jammy" comparison-report.md | grep -oP '\|\s*\d+\s*\|' | tail -1 | tr -d '| ')
+          CHISELED_TOTAL=$(grep "Chiseled (Bare Base)" comparison-report.md | grep -oP '\|\s*\d+\s*\|' | tail -1 | tr -d '| ')
+          CHISELED_DPKG_TOTAL=$(grep "Chiseled + dpkg status" comparison-report.md | grep -oP '\|\s*\d+\s*\|' | tail -1 | tr -d '| ')
+
+          cat > README.md << 'EOF'
+          # Chisel vs Trivy Comparison
+
+          This repository compares vulnerability scan results between vanilla Ubuntu Jammy and chiseled Ubuntu Jammy images using Trivy.
+
+          ## Latest Scan Results
+
+          **Tag:** `${{ github.ref_name }}`
+          **Run:** [View Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          EOF
+
+          # Add the comparison summary table
+          grep -A 5 "## Summary" comparison-report.md >> README.md
+          echo "" >> README.md
+
+          # Add key observations
+          grep -A 20 "## Key Observations" comparison-report.md >> README.md
+          echo "" >> README.md
+
+          cat >> README.md << 'EOF'
+          ## Artifacts
+
+          Download detailed scan results from the latest workflow run:
+
+          - [Vanilla Image Scan Results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - [Chiseled Image Scan Results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - [Chiseled + dpkg status Scan Results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - [Full Comparison Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          ## Container Images
+
+          The following images are available in GitHub Container Registry:
+
+          - `ghcr.io/${{ github.repository }}-vanilla:${{ github.ref_name }}`
+          - `ghcr.io/${{ github.repository }}-chiseled:${{ github.ref_name }}`
+          - `ghcr.io/${{ github.repository }}-chiseled-dpkg:${{ github.ref_name }}`
+
+          ## Repository Structure
+
+          ```
+          chisel-trivy-comparision/
+          ├── vanilla/
+          │   └── Dockerfile                      # Vanilla Ubuntu Jammy
+          ├── rockcraft-bare/
+          │   └── rockcraft.yaml                  # Chiseled (bare base)
+          └── rockcraft-dpkg/
+              └── rockcraft.yaml                  # Chiseled + dpkg status
+          ```
+
+          ## About
+
+          This comparison demonstrates the security benefits of using chiseled Ubuntu images (minimal, distroless-like containers) versus traditional Ubuntu base images.
+
+          **Key Findings:**
+          - Vanilla Ubuntu has fewer vulnerabilities initially but includes a much larger attack surface
+          - Chiseled images dramatically reduce the number of installed packages
+          - Adding dpkg metadata improves Trivy's vulnerability detection accuracy
+
+          ---
+
+          *Last updated: $(date -u '+%Y-%m-%d %H:%M:%S UTC') by [GitHub Actions](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+          EOF
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit and push README
+        run: |
+          git add README.md
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update README with scan results for ${{ github.ref_name }}
+
+          🤖 Generated with GitHub Actions
+          Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            git push
+          fi
 
       - name: Comment comparison on commit (if PR exists)
         uses: actions/github-script@v7
