@@ -1,0 +1,80 @@
+name: dnsutils-chiseled-dpkg
+summary: Minimal Ubuntu Jammy with dnsutils and dpkg status
+description: |
+  A minimal Ubuntu Jammy image with bind9-dnsutils installed on a bare base,
+  including a dpkg status file for vulnerability scanning.
+version: "1.0"
+base: bare
+build-base: ubuntu@22.04
+license: Apache-2.0
+platforms:
+  amd64:
+
+parts:
+  dnsutils:
+    plugin: nil
+    stage-packages:
+      - base-files
+      - ca-certificates
+      - bind9-dnsutils
+    build-packages:
+      - wget
+      - dpkg-dev
+      - file
+    override-prime: |
+      craftctl default
+
+      # Create dpkg directory structure
+      mkdir -p "${CRAFT_PRIME}/var/lib/dpkg"
+      mkdir -p "${CRAFT_PRIME}/var/lib/dpkg/info"
+      mkdir -p "${CRAFT_PRIME}/var/lib/dpkg/updates"
+
+      # Look for dpkg metadata in the stage area and copy it
+      echo "Searching for dpkg metadata in ${CRAFT_STAGE}..."
+
+      # Craft-parts may store dpkg info in various locations
+      for status_dir in "${CRAFT_STAGE}/var/lib/dpkg" "${CRAFT_PART_INSTALL}/var/lib/dpkg" "/tmp/dpkg"; do
+        if [ -d "${status_dir}" ]; then
+          echo "Found dpkg directory at ${status_dir}"
+
+          # Copy status file if it exists
+          if [ -f "${status_dir}/status" ]; then
+            echo "Copying dpkg status file..."
+            cp "${status_dir}/status" "${CRAFT_PRIME}/var/lib/dpkg/status"
+          fi
+
+          # Copy status.d directory if it exists
+          if [ -d "${status_dir}/status.d" ]; then
+            echo "Found status.d directory, concatenating files..."
+            cat "${status_dir}/status.d"/* > "${CRAFT_PRIME}/var/lib/dpkg/status" 2>/dev/null || true
+          fi
+
+          # Copy info directory if it exists
+          if [ -d "${status_dir}/info" ] && [ "$(ls -A ${status_dir}/info)" ]; then
+            echo "Copying dpkg info directory..."
+            cp -r "${status_dir}/info"/* "${CRAFT_PRIME}/var/lib/dpkg/info/" 2>/dev/null || true
+          fi
+        fi
+      done
+
+      # If we still don't have a status file, create a minimal one
+      if [ ! -s "${CRAFT_PRIME}/var/lib/dpkg/status" ]; then
+        echo "No dpkg status found, creating minimal status file from package cache..."
+
+        # Download chisel-wrapper for reference
+        wget -q -O /tmp/chisel-wrapper https://raw.githubusercontent.com/canonical/rocks-toolbox/main/chisel-wrapper || true
+
+        # Try to find .deb files in the craft cache
+        find /root/.cache /tmp -name "*.deb" 2>/dev/null | while read deb; do
+          if [ -f "$deb" ]; then
+            echo "Extracting metadata from $deb..."
+            dpkg-deb -f "$deb" >> "${CRAFT_PRIME}/var/lib/dpkg/status" 2>/dev/null || true
+            echo "" >> "${CRAFT_PRIME}/var/lib/dpkg/status"
+          fi
+        done
+      fi
+
+      # Ensure the status file exists even if empty
+      touch "${CRAFT_PRIME}/var/lib/dpkg/status"
+
+      echo "Final dpkg status file size: $(wc -l < ${CRAFT_PRIME}/var/lib/dpkg/status) lines"

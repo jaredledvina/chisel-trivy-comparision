@@ -211,9 +211,116 @@ jobs:
             docker push "${tag}"
           done
 
+  build-chiseled-dpkg:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build rock with Rockcraft (with dpkg status)
+        id: rockcraft
+        uses: canonical/craft-actions/rockcraft-pack@main
+        with:
+          path: rockcraft-with-dpkg-status.yaml
+
+      - name: Upload rock artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rock-file-dpkg
+          path: ${{ steps.rockcraft.outputs.rock }}
+
+      - name: Install skopeo
+        run: |
+          sudo snap install --devmode --channel edge skopeo
+
+      - name: Import rock to Docker
+        run: |
+          sudo skopeo --insecure-policy copy oci-archive:${{ steps.rockcraft.outputs.rock }} docker-daemon:rockcraft-dpkg-local:latest
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for chiseled-dpkg image
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-chiseled-dpkg
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha
+
+      - name: Tag chiseled-dpkg image
+        run: |
+          PRIMARY_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+          docker tag rockcraft-dpkg-local:latest ${PRIMARY_TAG}
+          echo "PRIMARY_TAG=${PRIMARY_TAG}" >> $GITHUB_ENV
+
+      - name: Run Trivy vulnerability scanner (JSON)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.PRIMARY_TAG }}
+          format: 'json'
+          output: 'chiseled-dpkg-trivy-report.json'
+
+      - name: Run Trivy vulnerability scanner (Table)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.PRIMARY_TAG }}
+          format: 'table'
+          output: 'chiseled-dpkg-trivy-report.txt'
+
+      - name: Run Trivy vulnerability scanner (SARIF)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.PRIMARY_TAG }}
+          format: 'sarif'
+          output: 'chiseled-dpkg-trivy-report.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'chiseled-dpkg-trivy-report.sarif'
+          category: 'chiseled-dpkg-image'
+
+      - name: Generate vulnerability summary
+        run: |
+          echo "## Chiseled Image (with dpkg status) Vulnerability Summary" > chiseled-dpkg-summary.md
+          echo "" >> chiseled-dpkg-summary.md
+          echo "\`\`\`" >> chiseled-dpkg-summary.md
+          cat chiseled-dpkg-trivy-report.txt >> chiseled-dpkg-summary.md
+          echo "\`\`\`" >> chiseled-dpkg-summary.md
+
+      - name: Upload scan results as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: chiseled-dpkg-scan-results
+          path: |
+            chiseled-dpkg-trivy-report.json
+            chiseled-dpkg-trivy-report.txt
+            chiseled-dpkg-summary.md
+
+      - name: Push chiseled-dpkg image
+        run: |
+          echo "${{ steps.meta.outputs.tags }}" | while IFS= read -r tag; do
+            docker tag rockcraft-dpkg-local:latest "${tag}"
+            docker push "${tag}"
+          done
+
   compare-results:
     runs-on: ubuntu-latest
-    needs: [build-vanilla, build-chiseled]
+    needs: [build-vanilla, build-chiseled, build-chiseled-dpkg]
     permissions:
       contents: read
 
@@ -230,8 +337,14 @@ jobs:
           name: chiseled-scan-results
           path: ./chiseled
 
+      - name: Download chiseled-dpkg scan results
+        uses: actions/download-artifact@v4
+        with:
+          name: chiseled-dpkg-scan-results
+          path: ./chiseled-dpkg
+
       - name: Install jq for JSON parsing
-        run: sudo apt-get update && sudo apt-get install -y jq
+        run: sudo apt-get update && sudo apt-get install -y jq bc
 
       - name: Generate comparison report
         run: |
@@ -247,7 +360,7 @@ jobs:
 
           echo "# Trivy Scan Comparison Report" > comparison-report.md
           echo "" >> comparison-report.md
-          echo "Comparison of vulnerability scans between vanilla Ubuntu Jammy and chiseled Ubuntu Jammy images." >> comparison-report.md
+          echo "Comparison of vulnerability scans between vanilla Ubuntu Jammy, chiseled Ubuntu Jammy (bare base), and chiseled with dpkg status." >> comparison-report.md
           echo "" >> comparison-report.md
 
           # Count vulnerabilities for vanilla
@@ -264,31 +377,48 @@ jobs:
           CHISELED_LOW=$(count_vulns "./chiseled/chiseled-trivy-report.json" "LOW")
           CHISELED_TOTAL=$((CHISELED_CRITICAL + CHISELED_HIGH + CHISELED_MEDIUM + CHISELED_LOW))
 
+          # Count vulnerabilities for chiseled-dpkg
+          CHISELED_DPKG_CRITICAL=$(count_vulns "./chiseled-dpkg/chiseled-dpkg-trivy-report.json" "CRITICAL")
+          CHISELED_DPKG_HIGH=$(count_vulns "./chiseled-dpkg/chiseled-dpkg-trivy-report.json" "HIGH")
+          CHISELED_DPKG_MEDIUM=$(count_vulns "./chiseled-dpkg/chiseled-dpkg-trivy-report.json" "MEDIUM")
+          CHISELED_DPKG_LOW=$(count_vulns "./chiseled-dpkg/chiseled-dpkg-trivy-report.json" "LOW")
+          CHISELED_DPKG_TOTAL=$((CHISELED_DPKG_CRITICAL + CHISELED_DPKG_HIGH + CHISELED_DPKG_MEDIUM + CHISELED_DPKG_LOW))
+
           echo "## Summary" >> comparison-report.md
           echo "" >> comparison-report.md
           echo "| Image | Critical | High | Medium | Low | Total |" >> comparison-report.md
           echo "|-------|----------|------|--------|-----|-------|" >> comparison-report.md
           echo "| Vanilla Ubuntu Jammy | $VANILLA_CRITICAL | $VANILLA_HIGH | $VANILLA_MEDIUM | $VANILLA_LOW | $VANILLA_TOTAL |" >> comparison-report.md
-          echo "| Chiseled Ubuntu Jammy | $CHISELED_CRITICAL | $CHISELED_HIGH | $CHISELED_MEDIUM | $CHISELED_LOW | $CHISELED_TOTAL |" >> comparison-report.md
+          echo "| Chiseled (Bare Base) | $CHISELED_CRITICAL | $CHISELED_HIGH | $CHISELED_MEDIUM | $CHISELED_LOW | $CHISELED_TOTAL |" >> comparison-report.md
+          echo "| Chiseled + dpkg status | $CHISELED_DPKG_CRITICAL | $CHISELED_DPKG_HIGH | $CHISELED_DPKG_MEDIUM | $CHISELED_DPKG_LOW | $CHISELED_DPKG_TOTAL |" >> comparison-report.md
           echo "" >> comparison-report.md
 
-          # Calculate reduction
+          echo "## Key Observations" >> comparison-report.md
+          echo "" >> comparison-report.md
+          echo "### Vanilla vs Chiseled (Bare Base)" >> comparison-report.md
           CRITICAL_REDUCTION=$((VANILLA_CRITICAL - CHISELED_CRITICAL))
           HIGH_REDUCTION=$((VANILLA_HIGH - CHISELED_HIGH))
           TOTAL_REDUCTION=$((VANILLA_TOTAL - CHISELED_TOTAL))
-
-          echo "## Vulnerability Reduction" >> comparison-report.md
-          echo "" >> comparison-report.md
-          echo "- **Critical vulnerabilities reduced by:** $CRITICAL_REDUCTION" >> comparison-report.md
-          echo "- **High vulnerabilities reduced by:** $HIGH_REDUCTION" >> comparison-report.md
-          echo "- **Total vulnerabilities reduced by:** $TOTAL_REDUCTION" >> comparison-report.md
-
-          if [ $TOTAL_REDUCTION -gt 0 ]; then
+          echo "- **Critical vulnerabilities reduced:** $CRITICAL_REDUCTION" >> comparison-report.md
+          echo "- **High vulnerabilities reduced:** $HIGH_REDUCTION" >> comparison-report.md
+          echo "- **Total vulnerabilities reduced:** $TOTAL_REDUCTION" >> comparison-report.md
+          if [ $VANILLA_TOTAL -gt 0 ]; then
             REDUCTION_PERCENT=$(echo "scale=1; $TOTAL_REDUCTION * 100 / $VANILLA_TOTAL" | bc)
             echo "- **Percentage reduction:** ${REDUCTION_PERCENT}%" >> comparison-report.md
           fi
-
           echo "" >> comparison-report.md
+
+          echo "### Chiseled (Bare Base) vs Chiseled + dpkg status" >> comparison-report.md
+          DPKG_CRITICAL_DIFF=$((CHISELED_DPKG_CRITICAL - CHISELED_CRITICAL))
+          DPKG_HIGH_DIFF=$((CHISELED_DPKG_HIGH - CHISELED_HIGH))
+          DPKG_TOTAL_DIFF=$((CHISELED_DPKG_TOTAL - CHISELED_TOTAL))
+          echo "- **Critical vulnerabilities difference:** $DPKG_CRITICAL_DIFF" >> comparison-report.md
+          echo "- **High vulnerabilities difference:** $DPKG_HIGH_DIFF" >> comparison-report.md
+          echo "- **Total vulnerabilities difference:** $DPKG_TOTAL_DIFF" >> comparison-report.md
+          echo "" >> comparison-report.md
+          echo "> **Note:** The dpkg status file allows Trivy to detect installed packages and their vulnerabilities more accurately." >> comparison-report.md
+          echo "" >> comparison-report.md
+
           echo "---" >> comparison-report.md
           echo "" >> comparison-report.md
 
@@ -297,6 +427,10 @@ jobs:
           echo "---" >> comparison-report.md
           echo "" >> comparison-report.md
           cat ./chiseled/chiseled-summary.md >> comparison-report.md
+          echo "" >> comparison-report.md
+          echo "---" >> comparison-report.md
+          echo "" >> comparison-report.md
+          cat ./chiseled-dpkg/chiseled-dpkg-summary.md >> comparison-report.md
           EOF
 
           chmod +x compare.sh
