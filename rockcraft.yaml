@@ -1,9 +1,9 @@
 name: dnsutils-chiseled
 summary: Chiseled Ubuntu Jammy with dnsutils
 description: |
-  A chiseled Ubuntu Jammy image with dnsutils installed.
+  A minimal Ubuntu Jammy image with bind9-dnsutils installed on a bare base.
 version: "1.0"
-base: ubuntu@22.04
+base: bare
 build-base: ubuntu@22.04
 license: Apache-2.0
 platforms:
@@ -13,5 +13,8 @@ parts:
   dnsutils:
     plugin: nil
     stage-packages:
-      - dnsutils_bins
-      - libc6_libs
+      - base-files_base
+      - base-files_release-info
+      - ca-certificates_data
+      - bind9-dnsutils
+      - bind9-libs_libs
