@@ -42,8 +42,8 @@ jobs:
       - name: Build vanilla image
         uses: docker/build-push-action@v5
         with:
-          context: .
-          file: ./Dockerfile
+          context: ./vanilla
+          file: ./vanilla/Dockerfile
           push: false
           load: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -120,6 +120,8 @@ jobs:
       - name: Build rock with Rockcraft
         id: rockcraft
         uses: canonical/craft-actions/rockcraft-pack@main
+        with:
+          path: rockcraft-bare
 
       - name: Upload rock artifact
         uses: actions/upload-artifact@v4
@@ -226,7 +228,7 @@ jobs:
         id: rockcraft
         uses: canonical/craft-actions/rockcraft-pack@main
         with:
-          path: rockcraft-with-dpkg-status.yaml
+          path: rockcraft-dpkg
 
       - name: Upload rock artifact
         uses: actions/upload-artifact@v4
