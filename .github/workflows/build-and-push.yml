@@ -455,74 +455,200 @@ jobs:
 
       - name: Generate README.md
         run: |
-          # Extract summary data from comparison report
-          VANILLA_TOTAL=$(grep "Vanilla Ubuntu Jammy" comparison-report.md | grep -oP '\|\s*\d+\s*\|' | tail -1 | tr -d '| ')
-          CHISELED_TOTAL=$(grep "Chiseled (Bare Base)" comparison-report.md | grep -oP '\|\s*\d+\s*\|' | tail -1 | tr -d '| ')
-          CHISELED_DPKG_TOTAL=$(grep "Chiseled + dpkg status" comparison-report.md | grep -oP '\|\s*\d+\s*\|' | tail -1 | tr -d '| ')
+          cat > parse_results.sh << 'PARSE_EOF'
+          #!/bin/bash
+
+          # Extract vulnerability counts from comparison report
+          extract_counts() {
+            local image_name="$1"
+            local line=$(grep "$image_name" comparison-report.md | grep -E '\|.*\|.*\|.*\|.*\|.*\|')
+
+            CRITICAL=$(echo "$line" | awk -F'|' '{print $3}' | tr -d ' ')
+            HIGH=$(echo "$line" | awk -F'|' '{print $4}' | tr -d ' ')
+            MEDIUM=$(echo "$line" | awk -F'|' '{print $5}' | tr -d ' ')
+            LOW=$(echo "$line" | awk -F'|' '{print $6}' | tr -d ' ')
+            TOTAL=$(echo "$line" | awk -F'|' '{print $7}' | tr -d ' ')
+
+            echo "$CRITICAL $HIGH $MEDIUM $LOW $TOTAL"
+          }
+
+          read V_CRIT V_HIGH V_MED V_LOW V_TOTAL <<< $(extract_counts "Vanilla Ubuntu Jammy")
+          read C_CRIT C_HIGH C_MED C_LOW C_TOTAL <<< $(extract_counts "Chiseled (Bare Base)")
+          read D_CRIT D_HIGH D_MED D_LOW D_TOTAL <<< $(extract_counts "Chiseled + dpkg status")
+
+          # Calculate reductions
+          calc_reduction() {
+            local from=$1
+            local to=$2
+            if [ "$from" -eq 0 ]; then
+              echo "N/A"
+            else
+              local diff=$((from - to))
+              local pct=$(echo "scale=1; ($diff * 100) / $from" | bc 2>/dev/null || echo "0")
+              if [ "$diff" -gt 0 ]; then
+                echo "↓ ${diff} (-${pct}%)"
+              elif [ "$diff" -lt 0 ]; then
+                echo "↑ ${diff#-} (+${pct#-}%)"
+              else
+                echo "→ 0"
+              fi
+            fi
+          }
+
+          V_TO_C_TOTAL=$(calc_reduction $V_TOTAL $C_TOTAL)
+          C_TO_D_TOTAL=$(calc_reduction $C_TOTAL $D_TOTAL)
+          V_TO_D_TOTAL=$(calc_reduction $V_TOTAL $D_TOTAL)
+
+          V_TO_C_CRIT=$(calc_reduction $V_CRIT $C_CRIT)
+          C_TO_D_CRIT=$(calc_reduction $C_CRIT $D_CRIT)
+
+          V_TO_C_HIGH=$(calc_reduction $V_HIGH $C_HIGH)
+          C_TO_D_HIGH=$(calc_reduction $C_HIGH $D_HIGH)
 
           cat > README.md << 'EOF'
-          # Chisel vs Trivy Comparison
+          # Ubuntu Vanilla vs Chiseled Container Comparison
 
-          This repository compares vulnerability scan results between vanilla Ubuntu Jammy and chiseled Ubuntu Jammy images using Trivy.
+          > Comparing vulnerability scan results between vanilla Ubuntu Jammy and chiseled Ubuntu images with Trivy
 
-          ## Latest Scan Results
+          ## 📊 Latest Scan Results
 
-          **Tag:** `${{ github.ref_name }}`
-          **Run:** [View Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          **Version:** `${{ github.ref_name }}`
+          **Scanned:** $(date -u '+%Y-%m-%d %H:%M UTC')
+          **Workflow:** [View Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
+          ---
+
+          ## 🔍 Three-Way Vulnerability Comparison
+
+          ### Progression Overview
+
+          ```
+          Vanilla Ubuntu          Chiseled (Bare)         Chiseled + dpkg
+          (Full Base)        →    (Minimal Base)     →    (With Metadata)
+          ════════════            ════════════            ════════════
           EOF
 
-          # Add the comparison summary table
-          grep -A 5 "## Summary" comparison-report.md >> README.md
-          echo "" >> README.md
-
-          # Add key observations
-          grep -A 20 "## Key Observations" comparison-report.md >> README.md
+          echo "   $V_TOTAL CVEs       $V_TO_C_TOTAL       $C_TOTAL CVEs      $C_TO_D_TOTAL      $D_TOTAL CVEs" >> README.md
+          echo '```' >> README.md
           echo "" >> README.md
 
           cat >> README.md << 'EOF'
-          ## Artifacts
+          ### Detailed Breakdown by Severity
 
-          Download detailed scan results from the latest workflow run:
+          <table>
+          <tr>
+            <th>Severity</th>
+            <th>Vanilla</th>
+            <th>→ Chiseled</th>
+            <th>Change</th>
+            <th>→ Chiseled+dpkg</th>
+            <th>Change</th>
+          </tr>
+          EOF
 
-          - [Vanilla Image Scan Results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
-          - [Chiseled Image Scan Results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
-          - [Chiseled + dpkg status Scan Results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
-          - [Full Comparison Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          echo "<tr><td>🔴 <strong>Critical</strong></td><td align=\"center\">$V_CRIT</td><td align=\"center\">$C_CRIT</td><td align=\"center\">$V_TO_C_CRIT</td><td align=\"center\">$D_CRIT</td><td align=\"center\">$C_TO_D_CRIT</td></tr>" >> README.md
+          echo "<tr><td>🟠 <strong>High</strong></td><td align=\"center\">$V_HIGH</td><td align=\"center\">$C_HIGH</td><td align=\"center\">$V_TO_C_HIGH</td><td align=\"center\">$D_HIGH</td><td align=\"center\">$C_TO_D_HIGH</td></tr>" >> README.md
+          echo "<tr><td>🟡 <strong>Medium</strong></td><td align=\"center\">$V_MED</td><td align=\"center\">$C_MED</td><td align=\"center\">$(calc_reduction $V_MED $C_MED)</td><td align=\"center\">$D_MED</td><td align=\"center\">$(calc_reduction $C_MED $D_MED)</td></tr>" >> README.md
+          echo "<tr><td>🔵 <strong>Low</strong></td><td align=\"center\">$V_LOW</td><td align=\"center\">$C_LOW</td><td align=\"center\">$(calc_reduction $V_LOW $C_LOW)</td><td align=\"center\">$D_LOW</td><td align=\"center\">$(calc_reduction $C_LOW $D_LOW)</td></tr>" >> README.md
+          echo "<tr><td><strong>TOTAL</strong></td><td align=\"center\"><strong>$V_TOTAL</strong></td><td align=\"center\"><strong>$C_TOTAL</strong></td><td align=\"center\"><strong>$V_TO_C_TOTAL</strong></td><td align=\"center\"><strong>$D_TOTAL</strong></td><td align=\"center\"><strong>$C_TO_D_TOTAL</strong></td></tr>" >> README.md
+          echo "</table>" >> README.md
+          echo "" >> README.md
 
-          ## Container Images
+          cat >> README.md << 'EOF'
 
-          The following images are available in GitHub Container Registry:
+          ### 📈 Key Insights
 
-          - `ghcr.io/${{ github.repository }}-vanilla:${{ github.ref_name }}`
-          - `ghcr.io/${{ github.repository }}-chiseled:${{ github.ref_name }}`
-          - `ghcr.io/${{ github.repository }}-chiseled-dpkg:${{ github.ref_name }}`
+          EOF
 
-          ## Repository Structure
+          echo "#### Vanilla → Chiseled (Bare Base)" >> README.md
+          echo "- **Total Reduction:** $V_TO_D_TOTAL vulnerabilities removed" >> README.md
+          echo "- **Attack Surface:** Minimal bare base eliminates unnecessary packages" >> README.md
+          echo "- **Trade-off:** Some vulnerabilities harder to detect without package metadata" >> README.md
+          echo "" >> README.md
+
+          echo "#### Chiseled → Chiseled + dpkg status" >> README.md
+          echo "- **Visibility Change:** $C_TO_D_TOTAL" >> README.md
+          echo "- **Detection:** Adding dpkg metadata allows Trivy to identify installed packages" >> README.md
+          echo "- **Recommendation:** Include dpkg status for production vulnerability scanning" >> README.md
+          echo "" >> README.md
+
+          cat >> README.md << 'EOF'
+
+          ---
+
+          ## 🐳 Container Images
+
+          All images are available in GitHub Container Registry:
+
+          | Image Type | Tag | Pull Command |
+          |------------|-----|--------------|
+          | **Vanilla** | `${{ github.ref_name }}` | `docker pull ghcr.io/${{ github.repository }}-vanilla:${{ github.ref_name }}` |
+          | **Chiseled (Bare)** | `${{ github.ref_name }}` | `docker pull ghcr.io/${{ github.repository }}-chiseled:${{ github.ref_name }}` |
+          | **Chiseled + dpkg** | `${{ github.ref_name }}` | `docker pull ghcr.io/${{ github.repository }}-chiseled-dpkg:${{ github.ref_name }}` |
+
+          ---
+
+          ## 📦 Download Scan Results
+
+          Access detailed Trivy scan reports from the [latest workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}):
+
+          - **Vanilla Image:** [JSON](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) | [Table](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) | [SARIF](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - **Chiseled Image:** [JSON](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) | [Table](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) | [SARIF](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - **Chiseled + dpkg:** [JSON](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) | [Table](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) | [SARIF](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - **Comparison Report:** [Full Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          ---
+
+          ## 🏗️ Repository Structure
 
           ```
           chisel-trivy-comparision/
           ├── vanilla/
-          │   └── Dockerfile                      # Vanilla Ubuntu Jammy
+          │   └── Dockerfile                 # Standard Ubuntu Jammy + dnsutils
           ├── rockcraft-bare/
-          │   └── rockcraft.yaml                  # Chiseled (bare base)
+          │   └── rockcraft.yaml            # Minimal bare base (no dpkg metadata)
           └── rockcraft-dpkg/
-              └── rockcraft.yaml                  # Chiseled + dpkg status
+              └── rockcraft.yaml            # Bare base + dpkg status file
           ```
-
-          ## About
-
-          This comparison demonstrates the security benefits of using chiseled Ubuntu images (minimal, distroless-like containers) versus traditional Ubuntu base images.
-
-          **Key Findings:**
-          - Vanilla Ubuntu has fewer vulnerabilities initially but includes a much larger attack surface
-          - Chiseled images dramatically reduce the number of installed packages
-          - Adding dpkg metadata improves Trivy's vulnerability detection accuracy
 
           ---
 
-          *Last updated: $(date -u '+%Y-%m-%d %H:%M:%S UTC') by [GitHub Actions](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})*
+          ## 💡 About This Comparison
+
+          This project demonstrates the security and size benefits of **chiseled Ubuntu images** (minimal, distroless-like containers) compared to traditional Ubuntu base images.
+
+          ### What are Chiseled Images?
+
+          Chiseled Ubuntu images use:
+          - **Bare base:** No OS bloat, no package manager, no shell
+          - **Minimal dependencies:** Only required files from packages
+          - **Reduced attack surface:** Fewer binaries = fewer vulnerabilities
+
+          ### Why Test With/Without dpkg Metadata?
+
+          - **Without dpkg status:** Smaller image, but vulnerability scanners can't detect all installed packages
+          - **With dpkg status:** Slightly larger, but enables accurate vulnerability detection for compliance
+
+          ### Key Takeaways
+
+          1. **Security:** Chiseled images significantly reduce CVE exposure
+          2. **Size:** Bare base images are dramatically smaller than full Ubuntu
+          3. **Scanning:** For production use, include dpkg metadata for compliance scanning
+          4. **Trade-offs:** Balance between minimal size and vulnerability visibility
+
+          ---
+
+          <div align="center">
+
+          **Last Updated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          **Generated by:** [GitHub Actions](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          </div>
           EOF
+          PARSE_EOF
+
+          chmod +x parse_results.sh
+          ./parse_results.sh
 
       - name: Configure Git
         run: |
